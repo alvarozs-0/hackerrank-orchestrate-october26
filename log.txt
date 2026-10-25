@@ -574,3 +574,59 @@ branch=main
 repo_root=C:\Users\alvar\OneDrive\Documents\Alvaro\Programming\hackerrank-orchestrate-october26
 worktree=main
 parent_agent=code-review
+## [2026-10-25T07:16:21Z] Where the AI feature lives
+
+User Prompt (verbatim, secrets redacted):
+where is the ai feature (just a question )
+
+Agent Response Summary:
+Pointed at the fact extractor, not the policy engine. The model client is code/agent.py. Prompts are in code/prompts/. main.py calls it for unmatched request text, and evidence_index.py calls it for screenshots and textless PDFs. The model does not choose deletion_status or write steps_json. The sample gate made no model call.
+
+Actions:
+* grep FactAgent and extract_image
+* read code/agent.py
+
+Context:
+tool=OpenCode
+model=grok-4.7
+branch=main
+repo_root=C:\Users\alvar\OneDrive\Documents\Alvaro\Programming\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+## [2026-10-25T07:18:24Z] Run sample and full audit
+
+User Prompt (verbatim, secrets redacted):
+good, job can we run the app for the sample input and also for the actual deletion_requests.csv
+
+Agent Response Summary:
+Ran python code/main.py --samples and python code/main.py. The sample gate decided all 32 cases, matched status 32/32, and matched steps 15/32. It wrote build/sample_predictions.csv and exited 1 because the steps do not fully match. The full run refused to write output.csv because no API key is set and 11 screenshots were not sent to vision. No output.csv was created.
+
+Actions:
+* python code/main.py --samples
+* python code/main.py
+
+Context:
+tool=OpenCode
+model=grok-4.7
+branch=main
+repo_root=C:\Users\alvar\OneDrive\Documents\Alvaro\Programming\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
+## [2026-10-25T07:28:53Z] Where to set the API key
+
+User Prompt (verbatim, secrets redacted):
+where do I set the api key
+
+Agent Response Summary:
+The app reads XAI_API_KEY or GROK_API_KEY from the process environment. It does not load a .env file. Told the user to set the variable in the current terminal and not to commit it or paste it into chat.
+
+Actions:
+* grep XAI_API_KEY in code/
+
+Context:
+tool=OpenCode
+model=grok-4.7
+branch=main
+repo_root=C:\Users\alvar\OneDrive\Documents\Alvaro\Programming\hackerrank-orchestrate-october26
+worktree=main
+parent_agent=none
