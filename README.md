@@ -160,11 +160,13 @@ Before submitting, confirm that:
 
 ## Solution
 
-The audit is a deterministic policy engine. A model is not required for the sample gate.
+The audit is a deterministic policy engine. A model extracts typed facts only. It does not choose `deletion_status` or write `steps_json`.
 
 ```bash
 python -m pip install -r requirements.txt
 python code/main.py --samples
 ```
 
-`--samples` writes `build/sample_predictions.csv` and prints the score against `dataset/sample_output.csv`. The full run writes root `output.csv` only when every case decides without a guess. It reads `DELETION_AUDIT_MODEL` (default `grok-4.7`) and `DELETION_AUDIT_FALLBACK_MODELS` from the environment when a model call is required.
+`--samples` writes `build/sample_predictions.csv` and prints the score against `dataset/sample_output.csv`. It exits non-zero when any public row disagrees. The full run writes root `output.csv` only when every case decides without a guess.
+
+Set `XAI_API_KEY` when a screenshot, a textless PDF page, or unmatched request wording must be read. `DELETION_AUDIT_MODEL` must start with `grok-4` and defaults to `grok-4.7`. `DELETION_AUDIT_FALLBACK_MODELS` is an optional comma-separated list used only after the primary call fails. Prompts live in `code/prompts/`. Extracted facts are cached in `build/extraction_cache.sqlite`. The sample gate does not require a model call.

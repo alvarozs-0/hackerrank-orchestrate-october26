@@ -32,6 +32,7 @@ class ResourceView:
     retention_until: str | None
     evidence_id: str
     captured_at: str
+    items: list[Observation] = field(default_factory=list)
 
 
 @dataclass
@@ -48,7 +49,7 @@ def decide_case(
     links: list[ActivityLink],
 ) -> CaseResult:
     eligible = [item for item in observations if item.captured_at <= audit_at]
-    linked_ids = _linked_ids(subject, eligible, links, audit_at)
+    linked_ids = _prefer_latest_absent_account(_linked_ids(subject, eligible, links, audit_at), eligible)
     encoded: dict[str, tuple[str, str]] = {}
     if not any(resource_id.startswith("account_") for resource_id in linked_ids):
         encoded = _encoded_absences(subject, eligible)
@@ -84,11 +85,26 @@ def decide_case(
     return CaseResult("INCOMPLETE", steps, [])
 
 
+def _prefer_latest_absent_account(linked_ids: set[str], observations: list[Observation]) -> set[str]:
+    """A later profile lookup replaces an older miss for a different account id."""
+    accounts = [item for item in observations if item.resource_id in linked_ids and item.resource_id.startswith("account_")]
+    latest: dict[str, Observation] = {}
+    for item in accounts:
+        current = latest.get(item.resource_id)
+        if current is None or item.captured_at >= current.captured_at:
+            latest[item.resource_id] = item
+    if len(latest) < 2 or any(item.presence != "absent" for item in latest.values()):
+        return linked_ids
+    winner = max(latest.values(), key=lambda item: (item.captured_at, item.file_id))
+    return {resource_id for resource_id in linked_ids if not resource_id.startswith("account_") or resource_id == winner.resource_id}
+
+
 def _linked_ids(subject: Subject, observations: list[Observation], links: list[ActivityLink], audit_at: str) -> set[str]:
     tokens = subject.tokens()
+    observed = {item.resource_id for item in observations}
     direct = {item.resource_id for item in observations if item.tokens & tokens}
     for link in links:
-        if link.event_time <= audit_at and link.tokens & tokens:
+        if link.event_time <= audit_at and link.tokens & tokens and link.resource_id in observed:
             direct.add(link.resource_id)
     one_hop = set(direct)
     for item in observations:
@@ -135,30 +151,57 @@ def _views(
             system_id = system_for(resource_id) or ""
             file_id, captured_at = encoded.get(resource_id, ("", ""))
             category = "USER_PROFILE" if resource_id.startswith("account_") else None
-            views[resource_id] = ResourceView(system_id, resource_id, category, "absent", False, None, None, None, file_id, captured_at)
+            synthetic = Observation(
+                file_id,
+                captured_at,
+                "encoded-absence",
+                system_id,
+                resource_id,
+                category,
+                "absent",
+                False,
+                None,
+                None,
+                None,
+                None,
+            )
+            views[resource_id] = ResourceView(
+                system_id, resource_id, category, "absent", False, None, None, None, file_id, captured_at, [synthetic]
+            )
             continue
-        items.sort(key=lambda item: item.captured_at)
-        latest = items[-1]
-        category = next((item.category for item in reversed(items) if item.category), None)
-        present = [item for item in items if item.presence == "present"]
-        chosen = present[-1] if present else latest
-        exposed = chosen.exposed
-        if any(item.presence == "present" and item.exposed for item in items):
-            exposed = True
-        flow = next((item.flow for item in reversed(items) if item.flow), None)
-        restore = next((item.restore for item in reversed(items) if item.restore), None)
+        items.sort(key=lambda item: (item.captured_at, item.file_id))
+        categories = {item.category for item in items if item.category}
+        category = next(iter(categories)) if len(categories) == 1 else (None if categories else None)
+        if len(categories) > 1:
+            category = _preferred_category(categories)
+        presences = {item.presence for item in items}
+        if "present" in presences:
+            presence = "present"
+        elif "absent" in presences:
+            presence = "absent"
+        else:
+            presence = "unknown"
+        exposed = any(item.presence == "present" and item.exposed for item in items)
+        if presence != "present":
+            exposed = False
+        flows = {item.flow for item in items if item.flow}
+        restores = {item.restore for item in items if item.restore}
+        flow = "active" if "active" in flows else ("disabled" if "disabled" in flows else None)
+        restore = "open" if "open" in restores else ("blocked" if "blocked" in restores else None)
         retention = next((item.retention_until for item in reversed(items) if item.retention_until), None)
+        chosen = items[-1]
         views[resource_id] = ResourceView(
             chosen.system_id or system_for(resource_id) or "",
             resource_id,
             category,
-            "present" if present else chosen.presence,
+            presence,
             exposed,
             flow,
             restore,
             retention,
             chosen.file_id,
             chosen.captured_at,
+            items,
         )
     return views
 
@@ -203,6 +246,56 @@ def _classify(view: ResourceView, audit_at: str) -> tuple[str | None, str] | Non
     return None
 
 
+def _preferred_category(categories: set[str]) -> str | None:
+    ranked = [
+        "SUPPORT_ATTACHMENT",
+        "SUPPORT_MESSAGE",
+        "ACCOUNT_TOMBSTONE",
+        "USER_PROFILE",
+        "SEARCH_INDEX_ENTRY",
+        "ANALYTICS_PROFILE",
+        "DATA_FLOW",
+        "BACKUP_ARCHIVE",
+        "SECURITY_AUDIT_LOG",
+        "USER_EXPORT",
+        "SECONDARY_IDENTIFIER",
+    ]
+    for category in ranked:
+        if category in categories:
+            return category
+    return sorted(categories)[0]
+
+
+def _cite(operation: str, view: ResourceView) -> str:
+    def proves(item: Observation) -> bool:
+        if operation == "REPORT_REMAINING_RECORD":
+            return item.presence == "present"
+        if operation == "REPORT_EXPOSED_PII":
+            return item.presence == "present" and bool(item.exposed)
+        if operation == "REPORT_ACTIVE_DATA_FLOW":
+            return item.flow == "active"
+        if operation == "REPORT_RESTORE_RISK":
+            return item.restore == "open"
+        if operation == "VERIFY_RECORD_ABSENT":
+            return item.presence == "absent"
+        if operation == "VERIFY_RECORD_PRESENT":
+            return item.presence == "present"
+        if operation in {"VERIFY_RECORD_REDACTED", "VERIFY_RECORD_ANONYMIZED"}:
+            return item.presence == "present" and not item.exposed
+        if operation == "VERIFY_DATA_FLOW_DISABLED":
+            return item.flow == "disabled"
+        if operation == "VERIFY_RESTORE_BLOCKED":
+            return item.restore == "blocked"
+        return False
+
+    proving = [item for item in view.items if proves(item) and item.file_id]
+    if not proving:
+        return view.evidence_id
+    latest = max(item.captured_at for item in proving)
+    tied = sorted((item for item in proving if item.captured_at == latest), key=lambda item: item.file_id)
+    return tied[0].file_id
+
+
 def _remediation(finding: str) -> str:
     return {
         "REPORT_REMAINING_RECORD": "DELETE_RECORD",
@@ -227,7 +320,7 @@ def _steps(phase: str, pairs: list[tuple[str, ResourceView]], cite: bool) -> lis
                 "resource_id": view.resource_id,
                 "operation": operation,
                 "state": OPERATION_STATE[operation],
-                "evidence_id": view.evidence_id if cite else "",
+                "evidence_id": _cite(operation, view) if cite else "",
             }
         )
     steps.sort(key=lambda step: (PHASE_ORDER[step["phase"]], order[step["operation"]], step["system_id"], step["resource_id"]))

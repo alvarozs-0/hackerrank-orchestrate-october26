@@ -14,13 +14,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+from agent import ExtractionError, FactAgent
 from classify import is_deletion_request
-from decide import STEP_KEYS, decide_case
+from decide import decide_case
 from evidence_index import build_index
 from identity import load_identities
 
 ROOT = Path(__file__).resolve().parents[1]
 DATASET = ROOT / "dataset"
+LAST_AGENT: FactAgent | None = None
 
 
 def main() -> int:
@@ -35,7 +37,7 @@ def main() -> int:
 def run_samples() -> int:
     requests = _read_csv(DATASET / "sample_deletion_requests.csv")
     expected = {row["case_id"]: row for row in _read_csv(DATASET / "sample_output.csv")}
-    results, blockers = _evaluate(requests)
+    results, blockers = _evaluate(requests, require_vision=False)
     out = ROOT / "build" / "sample_predictions.csv"
     _write(out, results)
     status_hits = 0
@@ -53,31 +55,49 @@ def run_samples() -> int:
         gold = expected[row["case_id"]]
         if row["deletion_status"] != gold["deletion_status"]:
             print(f"status mismatch {row['case_id']}: got {row['deletion_status'] or 'BLOCKED'} expected {gold['deletion_status']}")
-    return 0
+    matched = status_hits == len(expected) and step_hits == len(expected) and not blockers and len(results) == len(expected)
+    _write_usage(ROOT / "code" / "evaluation" / "usage_report.md", "sample gate")
+    return 0 if matched else 1
 
 
 def run_full() -> int:
     requests = _read_csv(DATASET / "deletion_requests.csv")
-    results, blockers = _evaluate(requests)
+    results, blockers = _evaluate(requests, require_vision=True)
     if blockers or len(results) != len(requests):
         print(f"refusing to write output.csv: {len(blockers)} cases have no grounded decision", file=sys.stderr)
         for case_id, reasons in list(blockers.items())[:20]:
             print(f"blocked {case_id}: {reasons[0]}", file=sys.stderr)
         return 1
     _write(ROOT / "output.csv", results)
+    _write_usage(ROOT / "code" / "evaluation" / "usage_report.md", "full dataset")
     print(f"wrote {len(results)} rows to output.csv")
     return 0
 
 
-def _evaluate(requests: list[dict[str, str]]) -> tuple[list[dict[str, str]], dict[str, list[str]]]:
+def _evaluate(requests: list[dict[str, str]], require_vision: bool) -> tuple[list[dict[str, str]], dict[str, list[str]]]:
+    global LAST_AGENT
     identities = load_identities(DATASET)
-    observations, links = build_index(DATASET)
+    agent = FactAgent.from_env(ROOT / "build" / "extraction_cache.sqlite")
+    LAST_AGENT = agent
+    try:
+        observations, links = build_index(DATASET, agent)
+    except ExtractionError as exc:
+        return [], {request["case_id"]: [str(exc)] for request in requests[:1]} or {"run": [str(exc)]}
     results = []
     blockers: dict[str, list[str]] = {}
+    if agent.vision_skipped and require_vision:
+        blockers["run"] = [f"vision extraction skipped for {', '.join(agent.vision_skipped[:8])}"]
+        return results, blockers
     for request in requests:
         decision = is_deletion_request(request["request_text"])
         if decision is None:
-            blockers[request["case_id"]] = ["unmatched request text"]
+            try:
+                decision = agent.classify(request["request_text"])
+            except ExtractionError as exc:
+                blockers[request["case_id"]] = [str(exc)]
+                continue
+        if decision is None:
+            results.append({"case_id": request["case_id"], "deletion_status": "NOT_APPLICABLE", "steps_json": "[]"})
             continue
         if not decision:
             results.append({"case_id": request["case_id"], "deletion_status": "NOT_APPLICABLE", "steps_json": "[]"})
@@ -99,6 +119,59 @@ def _evaluate(requests: list[dict[str, str]]) -> tuple[list[dict[str, str]], dic
         )
     results.sort(key=lambda row: int(row["case_id"].split("_")[1]))
     return results, blockers
+
+
+def _write_usage(path: Path, label: str) -> None:
+    agent = LAST_AGENT
+    lines = [
+        "# Token usage",
+        "",
+        f"Run: {label}",
+        "",
+        "The policy engine chooses `deletion_status` and `steps_json`. A model is called only to extract typed facts or to answer yes/no on unmatched request text.",
+        "",
+        "Environment: `DELETION_AUDIT_MODEL` (default `grok-4.7`), `DELETION_AUDIT_FALLBACK_MODELS` (empty by default), `XAI_API_KEY`.",
+        "",
+    ]
+    if agent is None or not agent.usages:
+        lines.extend(
+            [
+                "No model call was made. Input tokens: 0. Output tokens: 0. Estimated cost: $0.",
+                "",
+                "Provider: xai. Model configured: DELETION_AUDIT_MODEL, default grok-4.7. Calls: 0.",
+            ]
+        )
+    else:
+        total_calls = total_in = total_out = 0
+        total_cost = 0.0
+        lines.append("| Model | Calls | Input tokens | Output tokens | Estimated USD |")
+        lines.append("| --- | --- | --- | --- | --- |")
+        for model, usage in sorted(agent.usages.items()):
+            lines.append(
+                f"| {usage.provider}/{model} | {usage.calls} | {usage.input_tokens} | {usage.output_tokens} | {usage.estimated_cost_usd:.4f} |"
+            )
+            total_calls += usage.calls
+            total_in += usage.input_tokens
+            total_out += usage.output_tokens
+            total_cost += usage.estimated_cost_usd
+        requests = max(total_calls, 1)
+        lines.extend(
+            [
+                "",
+                f"Overall calls: {total_calls}",
+                f"Overall input tokens: {total_in}",
+                f"Overall output tokens: {total_out}",
+                f"Average tokens per model call: {(total_in + total_out) / requests:.1f}",
+                f"Estimated total cost: ${total_cost:.4f}",
+                f"Estimated cost per model call: ${total_cost / requests:.4f}",
+                "",
+                "Cost uses a published-style estimate of $3 per million input tokens and $15 per million output tokens. It is not an invoice.",
+            ]
+        )
+    if agent and agent.vision_skipped:
+        lines.extend(["", f"Screenshots not sent to vision: {len(agent.vision_skipped)}."])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 def _write(path: Path, rows: list[dict[str, str]]) -> None:
