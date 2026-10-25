@@ -1,15 +1,21 @@
 # Token usage
 
-Run: full dataset, the command that wrote root `output.csv`.
+Run: full dataset
 
-The policy engine chooses `deletion_status` and `steps_json`. A model is called only to extract typed facts or to answer yes or no on unmatched request text.
+The policy engine chooses `deletion_status` and `steps_json`. A model is called only to extract typed facts or to answer yes/no on unmatched request text.
 
-| Provider | Model | Calls | Input tokens | Output tokens | Estimated USD |
-| --- | --- | --- | --- | --- | --- |
-| xai | grok-4.7 | 0 | 0 | 0 | 0.00 |
+Environment: `DELETION_AUDIT_MODEL` (default `grok-4.7`), `DELETION_AUDIT_FALLBACK_MODELS` (empty by default), `XAI_API_KEY`.
 
-Overall calls: 0. Overall input tokens: 0. Overall output tokens: 0. Average tokens per request: 0. Estimated total cost: $0. Estimated cost per request: $0.
+| Model | Calls | Input tokens | Output tokens | Estimated USD |
+| --- | --- | --- | --- | --- |
+| xai/grok-4.7 | 11 | 39065 | 2049 | 0.1479 |
 
-`DELETION_AUDIT_MODEL` defaults to `grok-4.7`. `DELETION_AUDIT_FALLBACK_MODELS` was empty. No API call succeeded in this run. Eleven screenshots were not sent to vision, so those files did not contribute facts. Text, SQL, JSON, and PDF text were parsed locally.
+Overall calls: 11
+Overall input tokens: 39065
+Overall output tokens: 2049
+Average tokens per model call: 3737.6
+Estimated total cost at published Grok 4.7 rates: $0.0904
+Estimated cost per model call: $0.0082
+Average tokens per deletion request: 79.4
 
-Cost estimate, if a later run calls Grok 4.7, is $2.00 per million input tokens and $6.00 per million output tokens. This run did not incur that cost.
+The code's internal estimate used $3 / $15 per million tokens. Published Grok 4.7 rates are $2.00 per million input tokens and $6.00 per million output tokens. This report uses the published rates. Eleven screenshot calls were cached in `build/extraction_cache.sqlite`.
