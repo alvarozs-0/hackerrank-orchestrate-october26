@@ -11,6 +11,8 @@ Northstar Shop lost money because a deletion workflow reported "Complete" while 
 
 The agent must process every request in `dataset/deletion_requests.csv` (518 cases), decide whether the person actually requested deletion, reconstruct the true state at `audit_at` from the supplied evidence, apply the deletion policy, and output a correctly structured answer.
 
+The contract is `problem_statement.md` and `AGENTS.md` §6. This file may only decide what those leave open. If they disagree, they win.
+
 **Success looks like:**
 - A root-level `output.csv` with exactly 518 rows (one per `case_id`), sorted by `case_id`.
 - High accuracy on deletion status (`COMPLETE`, `INCOMPLETE`, `NOT_APPLICABLE`).
@@ -45,19 +47,19 @@ The agent must process every request in `dataset/deletion_requests.csv` (518 cas
 | Layer | Choice | Why / Notes |
 | ----- | ------ | ----------- |
 | Language | Python | Best ecosystem for CSV processing, SQLite, PDF/image handling, and LLM tooling. Starter entry point is already `code/main.py`. |
-| LLM / Multimodal | Grok (xAI API) — `grok-4` / `grok-4.7` | Strong reasoning + native vision support. User has Premium access. Use for classification, policy reasoning, image/PDF analysis, and step generation. |
-| Alternative LLM | Gemini free tier or Groq (Llama) | Zero-cost option for text stages. Use Gemini when vision is needed on free tier. |
+| LLM / Multimodal | xAI Grok 4 family | Fact extraction only. Does not choose `deletion_status` or write `steps_json`. See ADR-0001. Model id comes from the environment. Default is `grok-4.7`. Any id starting with `grok-4` is allowed. `grok-build-0.1` is not. |
+| Alternative LLM | Env fallback list, empty by default | Fact extraction only, and only when the primary Grok 4 call fails. Never chooses status or writes steps. Do not hardcode Gemini or Groq. |
 | Data processing | pandas + sqlite3 | Load CSVs and query SQL evidence dumps directly. |
-| Document / Vision | Multimodal Grok calls + pdfplumber / pymupdf | Extract text from PDFs first; send images or important PDF pages to vision only when needed. |
+| Document / Vision | pdfplumber / pymupdf, then vision | Text-extract PDFs first. Vision only for screenshots and PDF pages with no usable text. |
 | Agent structure | Structured multi-stage pipeline (LangGraph optional) | Prefer deterministic stages with targeted LLM calls over a single free-form agent for reliability on 518 cases. |
-| Caching | Local cache (JSON/SQLite) | Cache identity resolution, evidence extraction, and vision results. Critical for cost and speed. |
+| Caching | Local SQLite | Cache identity resolution, evidence extraction, and vision results. Critical for cost and speed. |
 | Evaluation | Custom harness against `sample_output.csv` | Required for `evaluation/evaluation_report.md`. |
 
 ---
 
 ## 4. Architecture
 
-The system is a multi-stage pipeline. Each stage is deterministic where possible; the LLM is used for classification, ambiguous interpretation, vision, and structured step generation.
+The system is a multi-stage pipeline. Status and steps are deterministic. The model may only extract facts that code cannot establish from structured fields. It must not choose `deletion_status` or write `steps_json`. See `docs/adr/0001-deterministic-policy-engine.md`.
 
 ```mermaid
 flowchart TD
@@ -102,9 +104,28 @@ flowchart LR
 **Key decisions:**
 - Do not trust `reported_status`. Reconstruct state from evidence at or before `audit_at`.
 - Resolve both current and historical identifiers. The request email may be old.
-- Prefer deterministic matching (identifiers, resource IDs, timestamps) before falling back to the LLM.
-- Cache aggressively. Many evidence files will be relevant to multiple cases.
-- For incomplete cases, disable data flows and block restores before changing dependent records.
+- A resource is relevant only through a grounded link. One cross-reference hop counts. A second hop does not. A deletion-worker timestamp is not a link. An unlinked sample resource, such as `analytics_901` or `account_4857`, stays out rather than being guessed.
+- A category printed on a record is authoritative. A resource prefix determines `system_id` only, never a `deletion_rules.csv` category.
+- Two tables in one SQL file are two copies. An absent primary does not cancel a live replica.
+- A deletion request includes a request to delete, erase, or close the account, and a request to inspect, confirm, or verify that deletion. A different action with no deletion ask is `NOT_APPLICABLE`.
+- The model does not choose status or write steps. See ADR-0001. It consumes only typed facts.
+- Code decides whether `request_text` is a deletion request. A model is called only when the text matches neither a deletion pattern nor a known non-deletion pattern. See ADR-0002.
+- Cite a `file_id` when a file captured at or before `audit_at` proves the step. If several files prove it, cite the latest `captured_at`, then the lowest `file_id`. See ADR-0003. Cite an `activity_id` or `audit_id` only when no such file exists. That tie-break does not drop an older snapshot that still shows prohibited data.
+- Unmatched `request_text` is a deletion request only when a model returns yes. Otherwise it is `NOT_APPLICABLE`.
+- A fallback model runs only when the primary Grok 4 call fails. The fallback list comes from the environment and is empty by default. If a required extraction still fails, the run exits non-zero and does not write `output.csv`.
+- Model extraction returns only typed fields: identifiers seen, `system_id`, `resource_id`, a printed `deletion_rules.csv` category, and a state observation. It does not return a status, an operation, or a free-text finding.
+- Absence may be an explicit miss, or omission from the snapshot that should hold the record. The cited file need not contain the resource string.
+- The three required custom evaluation cases are one explicit non-deletion request, one tombstone that still exposes PII, and one sync or restore that can recreate deleted data.
+- Parse and index all 94 evidence files once, then resolve each case from that index plus the CSVs.
+- Cache extracted facts in local SQLite.
+- Text-extract PDFs. Use vision only for screenshots and for PDF pages with no usable text.
+- Do not run the 518-case file until all 32 sample rows match on status and ordered steps.
+- Within each phase, order steps by the operation table, then `system_id`, then `resource_id`.
+- An account tombstone is `REDACT`: keep `user_id`; remove name, email, phone, and email hash. Do not invent a tombstone operation.
+- For incomplete cases, findings cover violations only. Remediation repeats those violations in operation-table order: disable data flows and block restores before changing records. Verification lists the required end state of every relevant record and risk, including ones that were already compliant, with an empty `evidence_id`.
+- A `DELETE` record that still exists is `REPORT_REMAINING_RECORD`. A `REDACT` or `ANONYMIZE` record that still has direct identifiers is `REPORT_EXPOSED_PII`. A compliant `RETAIN` record is not a finding. Active copy processes are `REPORT_ACTIVE_DATA_FLOW`. Restorable backups are `REPORT_RESTORE_RISK`.
+- If no rule covers a relevant record, or it has no printed category, the run stops. Do not invent a `DELETE`. See ADR-0004.
+- A present security audit with no `retention_until` is still within retention. An explicit `retention_until` before `audit_at` stops the run. A missing legal-hold flag stops the run.
 - Findings and COMPLETE-case verification steps must cite real evidence IDs. Remediation and future verification steps use an empty `evidence_id`.
 
 ---
@@ -116,8 +137,9 @@ flowchart LR
 - **User flow:** Input request → classify as deletion or not.
 - **Acceptance criteria:**
   - [ ] Correctly marks non-deletion requests (access, correction, export, opt-out) as `NOT_APPLICABLE` with `steps_json = []`.
-  - [ ] Handles multilingual request text.
-- **Notes / edge cases:** Some requests ask to inspect systems or confirm status without clearly authorizing deletion.
+  - [ ] Handles multilingual request text with the same rule. Language is not a special case.
+  - [ ] Decides known deletion and non-deletion patterns in code. Calls a model only for unmatched wording. A no or an uncertain answer is `NOT_APPLICABLE`.
+- **Notes / edge cases:** Inspect, confirm, or verify wording about a deletion is still a deletion request. Samples `case_25`, `case_26`, and `case_28` are `COMPLETE`, not `NOT_APPLICABLE`.
 
 ### Feature: Identity Resolution
 - **What it does:** Expands the request email into all known current and historical identifiers.
@@ -136,14 +158,15 @@ flowchart LR
 ### Feature: Policy Application & Status Decision
 - **What it does:** Applies `deletion_rules.csv` and decides `COMPLETE`, `INCOMPLETE`, or `NOT_APPLICABLE`.
 - **Acceptance criteria:**
-  - [ ] Correctly handles ACCOUNT_TOMBSTONE (preserve stable user_id, remove direct identifiers).
+  - [ ] Handles ACCOUNT_TOMBSTONE as REDACT: preserve stable user_id, remove direct identifiers. Do not invent a tombstone operation.
   - [ ] Reports remaining records, exposed PII, active data flows, and restore risks.
   - [ ] Only marks COMPLETE when every relevant copy has the required treatment and no recreation path exists.
 
 ### Feature: Step Generation
 - **What it does:** Produces the ordered `steps_json` array.
 - **Acceptance criteria:**
-  - [ ] Phases in order: FINDING → REMEDIATION → VERIFICATION.
+  - [ ] Phases in order: FINDING → REMEDIATION → VERIFICATION. Within a phase, operation-table order, then `system_id`, then `resource_id`.
+  - [ ] Steps are emitted by the policy engine, not by a model.
   - [ ] Steps numbered consecutively from 1.
   - [ ] Uses only allowed operations and states.
   - [ ] COMPLETE cases contain only verification steps with evidence citations.
@@ -152,7 +175,7 @@ flowchart LR
 ### Feature: Evaluation & Reporting
 - **What it does:** Measures performance on sample cases and documents usage.
 - **Acceptance criteria:**
-  - [ ] Produces `evaluation/evaluation_report.md` with accuracy metrics and at least three custom cases.
+  - [ ] Produces `evaluation/evaluation_report.md` with accuracy metrics and at least three custom cases: one explicit non-deletion request, one tombstone that still exposes PII, and one sync or restore that can recreate deleted data.
   - [ ] Produces `evaluation/usage_report.md` with model calls, tokens, and estimated cost for the full run.
 
 ---
@@ -203,7 +226,7 @@ The solution is a batch process, not a service. Main interfaces:
 
 - **Performance:** Must complete all 518 cases in a reasonable time. Aggressive caching is required.
 - **Cost:** Track token usage. Prefer deterministic code for matching; use the LLM only where needed. Cache vision results.
-- **Determinism:** Ordering of steps and JSON serialization should be stable.
+- **Determinism:** Ordering of steps and JSON serialization must be stable. Within a phase, follow the operation-table order, then `system_id`, then `resource_id` ascending.
 - **Correctness:** Never use evidence after `audit_at`. Never invent operations or states.
 - **Security:** Never commit API keys. Read secrets from environment variables only.
 - **Reproducibility:** A clean run should produce a valid `output.csv`.
@@ -240,20 +263,41 @@ The solution is a batch process, not a service. Main interfaces:
 | 1 | Understand problem, study sample cases, set up project structure and caching | Agent can load data and explain one sample case end-to-end |
 | 2 | Identity resolution + request classification | Correctly classifies sample requests and expands identifiers |
 | 3 | Evidence search (text + SQL + vision) | Finds relevant evidence for sample cases with correct citations |
-| 4 | Policy engine + status decision | Matches sample deletion_status on most cases |
-| 5 | Step generation | Produces valid, ordered steps_json that closely matches samples |
-| 6 | Full evaluation loop + 518-case run | Valid output.csv + evaluation reports written |
+| 4 | Policy engine + status decision | Matches sample deletion_status on all 32 rows |
+| 5 | Step generation | Ordered steps_json matches all 32 sample rows on phase, operation, state, system, resource, and evidence id |
+| 6 | Full evaluation loop + 518-case run | Starts only after phase 5 matches. Valid output.csv + evaluation reports written |
 | 7 | Packaging | code.zip and supporting files ready for submission |
 
 ---
 
 ## 11. Open Questions / Decisions Still Needed
 
-- Exact Grok model name and vision call pattern to standardize on.
-- How aggressively to use vision vs. text extraction for PDFs.
-- Whether to pre-index all evidence or search on demand per case.
-- Preferred caching strategy (file-based JSON vs. SQLite).
-- How to handle ambiguous multilingual requests that are not clearly deletions.
+Settled in the grill, and recorded above:
+
+- Contract beats this file.
+- Status and steps come from a deterministic policy engine (ADR-0001).
+- SQLite cache, pre-indexed evidence, vision only when text cannot see the artifact.
+- Sample exact-match gates the 518-case run.
+- A deletion request includes inspect, confirm, or verify of a deletion (ADR-0002).
+- An account tombstone is REDACT, not a fifth action.
+- Authorization of known wording is a rule. A model sees only unmatched text.
+- The policy engine consumes only typed facts.
+- Cite a file when one proves the step. Absence includes omission from the relevant snapshot.
+- Custom cases cover non-deletion, an exposed tombstone, and a recreation path.
+- Primary model is any xAI id starting with `grok-4`, from the environment, default `grok-4.7`.
+- Fallbacks are an environment list, empty by default, and run only when the primary call fails.
+- Unmatched wording is `NOT_APPLICABLE` unless the model affirms a deletion request.
+- Several proving files: latest `captured_at`, then lowest `file_id` (ADR-0003).
+- A required extraction that fails, with no fallback answer, aborts the run. No guessed status and no partial `output.csv`.
+- Extraction fields are identifiers, `system_id`, `resource_id`, a printed category, and a state observation. No verdict.
+- A resource is relevant only through a grounded link (ADR-0005). Unlinked resources are omitted, not guessed.
+- A printed category beats the resource prefix. No printed category stops the run (ADR-0004).
+- Two tables in one SQL file are two copies.
+- Incomplete verification covers the full end state, not only the findings.
+- The finding operation follows the required action.
+- Fail-closed extraction and unmatched rules stop the run (ADR-0004).
+
+Confirmed by the user. The grill frontier is empty.
 
 ---
 

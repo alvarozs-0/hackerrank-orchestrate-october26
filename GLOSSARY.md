@@ -2,6 +2,28 @@
 
 Terms used in the HackerRank Orchestrate October 2026 challenge and the deletion-audit agent.
 
+## Language
+
+**Deletion request**:
+A `request_text` that asks to delete, erase, or close the account, or to inspect, confirm, or verify that a deletion happened. It authorizes a deletion audit in any language.
+_Avoid_: erasure request, privacy request, DSR
+
+**Permitted identifier**:
+The stable `user_id` an account tombstone may keep. Name, email, phone, and email hash are not permitted identifiers.
+_Avoid_: safe identifier, allowed PII
+
+**Absence**:
+A record that is not present at `audit_at`. It may be proved by an explicit miss, or by omission from a snapshot of the system that should hold it.
+_Avoid_: gone, deletion claim
+
+**Retention period**:
+The interval a security audit must be kept. A supplied `retention_until` is within retention when it is at or after `audit_at`. If no expiry is supplied, the period has not been shown to have ended.
+_Avoid_: forever, missing means delete
+
+**Grounded link**:
+A tie, at or before `audit_at`, from a resource to the subject's current or historical identifier, `user_id`, or one same-row cross-reference such as `subject_reference` or `source_resource_id`. A second hop does not count. A deletion-worker timestamp is not a grounded link. If every present account row in a snapshot encodes the user number in the account id, an omitted subject uses that encoding.
+_Avoid_: time window, nearest activity, guessed resource, second hop
+
 ---
 
 ## Challenge & Output Terms
@@ -11,12 +33,12 @@ Terms used in the HackerRank Orchestrate October 2026 challenge and the deletion
 | **case_id** | Unique identifier for a deletion request and its corresponding output row. |
 | **deletion_status** | Final decision for a case: `COMPLETE`, `INCOMPLETE`, or `NOT_APPLICABLE`. |
 | **steps_json** | Ordered JSON array of step objects describing findings, remediation, and verification. |
-| **NOT_APPLICABLE** | The request does not authorize deletion (e.g., access, correction, export, marketing opt-out). `steps_json` must be `[]`. |
-| **COMPLETE** | Every relevant copy has the required treatment, required retained records exist, and no active process can recreate prohibited data. Output contains only verification steps. |
-| **INCOMPLETE** | At least one policy violation or recreation risk remains. Output must include findings, a full ordered remediation plan, and post-remediation verification steps. |
+| **NOT_APPLICABLE** | The request asks for a different action, such as access, correction, export, or marketing opt-out, and does not ask for deletion. `steps_json` must be `[]`. Inspecting or confirming a deletion is not this. |
+| **COMPLETE** | Every relevant copy has the required treatment, retained records still exist and contain only permitted identifiers, and no active sync, import, or restore path can recreate prohibited data. Output contains only verification steps. |
+| **INCOMPLETE** | At least one policy violation or recreation risk remains. Output must include findings, a full ordered remediation plan, and verification of the required end state for every relevant record and risk, including ones that were already compliant. |
 | **audit_at** | Timestamp cutoff. Only information available at or before this time may be used to decide the case. |
 | **reported_status** | The deletion workflow’s claim (`COMPLETE`, `PARTIALLY_COMPLETE`, or `NOT_STARTED`). This is a claim, not proof. |
-| **request_text** | Free-text message from the person. May be in any language. Used to determine whether deletion was actually requested. |
+| **request_text** | Free-text message from the person, in any language. It either is a deletion request or it is not. |
 
 ---
 
@@ -25,12 +47,12 @@ Terms used in the HackerRank Orchestrate October 2026 challenge and the deletion
 | Term | Definition |
 | ---- | ---------- |
 | **step_no** | Consecutive integer starting at 1. |
-| **phase** | One of `FINDING`, `REMEDIATION`, or `VERIFICATION`. Must appear in that order. |
+| **phase** | One of `FINDING`, `REMEDIATION`, or `VERIFICATION`, in that order. Within a phase, steps follow the operation-table order, then `system_id`, then `resource_id`. |
 | **system_id** | Identifier of the system that holds the record or process (e.g., `account_service`, `backup_service`). |
 | **resource_id** | Identifier of the specific record or process (e.g., `account_005`, `backup_4978`). |
 | **operation** | The action or observation being reported. Must be one of the allowed operations. |
 | **state** | The current or target state of the resource (e.g., `PRESENT`, `ABSENT`, `REDACTED`, `ACTIVE`, `BLOCKED`). |
-| **evidence_id** | Reference to the participant-visible evidence that supports a finding or verification (`file_id`, `activity_id`, or `audit_id`). Empty string for proposed future work. |
+| **evidence_id** | Participant-visible proof for a finding or a `COMPLETE` verification. Cite a `file_id` when a file captured at or before `audit_at` proves the step. If several files prove it, cite the latest `captured_at`, then the lowest `file_id`. Cite an `activity_id` or `audit_id` only when no such file exists. Empty string for proposed future work. |
 
 ---
 
@@ -69,8 +91,8 @@ Terms used in the HackerRank Orchestrate October 2026 challenge and the deletion
 
 | Term | Definition |
 | ---- | ---------- |
-| **deletion_rules.csv** | Defines the required action for each data category and condition (DELETE, REDACT, ANONYMIZE, RETAIN, or special tombstone handling). |
-| **ACCOUNT_TOMBSTONE** | A retained record that keeps the stable internal `user_id` so other permitted records can still reference it, while direct identifiers (name, email, phone, email hash, etc.) must be removed. |
+| **deletion_rules.csv** | Defines the required action for each data category and condition. The actions are DELETE, REDACT, ANONYMIZE, and RETAIN. |
+| **ACCOUNT_TOMBSTONE** | A record whose required action is REDACT, not a separate action. It keeps the stable internal `user_id` so other permitted records can still reference it, and it must not contain name, email, phone, or email hash. |
 | **REDACT** | Keep the record but remove prohibited direct identifiers. |
 | **ANONYMIZE** | Keep the record after irreversibly unlinking it from the user. |
 | **RETAIN** | The record must be preserved (e.g., security audit logs within retention period, legal holds, or backups where restore can be blocked). |
@@ -86,7 +108,7 @@ Terms used in the HackerRank Orchestrate October 2026 challenge and the deletion
 | **file_id** | Participant-visible identifier for an evidence file (e.g., `evidence_54`). |
 | **activity_id** | Identifier from `system_activity.csv` that can be cited as evidence. |
 | **audit_id** | Identifier from audit-related evidence that can be cited. |
-| **Replica** | A copy of a database (read replica, regional replica, reporting replica, failover replica). May lag behind the primary and contain data that was already deleted elsewhere. |
+| **Replica** | A copy of a database, including a second table in the same SQL file. It may lag the primary and still hold data that was deleted elsewhere. |
 | **Active data flow** | A running process (sync, import, indexing, etc.) that can copy or recreate the user’s data. |
 | **Restore risk** | A backup or archive from which the user’s data can still be restored. |
 | **Ghost data** | Personal data that remains in the system after a deletion workflow reported completion. |

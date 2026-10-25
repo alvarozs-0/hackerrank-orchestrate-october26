@@ -155,3 +155,16 @@ Before submitting, confirm that:
 - `code.zip` includes your runnable code, `README.md`, `code/evaluation/evaluation_report.md`, and `code/evaluation/usage_report.md`;
 - `log.txt` follows the `AGENTS.md` turn format and is uploaded to the `chat_transcript` slot; and
 - no API keys, credentials, real personal data, or sensitive configuration values are included.
+
+---
+
+## Solution
+
+The audit is a deterministic policy engine. A model is not required for the sample gate.
+
+```bash
+python -m pip install -r requirements.txt
+python code/main.py --samples
+```
+
+`--samples` writes `build/sample_predictions.csv` and prints the score against `dataset/sample_output.csv`. The full run writes root `output.csv` only when every case decides without a guess. It reads `DELETION_AUDIT_MODEL` (default `grok-4.7`) and `DELETION_AUDIT_FALLBACK_MODELS` from the environment when a model call is required.
