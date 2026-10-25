@@ -345,7 +345,7 @@ def _from_document_text(row: dict[str, str], path: Path, text: str) -> list[Obse
         observation = _from_record(row, f"pdf:{resource_id}", record, system, category, extra_text=window)
         if observation is not None:
             observation.presence = "present"
-            observation.exposed = bool(_direct_identifiers(window))
+            observation.exposed = bool(EMAIL_RE.search(window) or PHONE_RE.search(window) or HASH_RE.search(window))
             found.append(observation)
     return found
 

@@ -238,6 +238,8 @@ def _classify(view: ResourceView, audit_at: str) -> tuple[str | None, str] | Non
             return None, "VERIFY_RECORD_ANONYMIZED"
         return None
     if view.category in RETAIN_CATEGORIES:
+        if view.category == "LEGAL_HOLD_RECORD" and view.hold_active is None:
+            return None
         if view.category == "SECURITY_AUDIT_LOG" and view.retention_until and view.retention_until < audit_at:
             return None
         if view.presence == "present":
