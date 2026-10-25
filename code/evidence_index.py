@@ -70,6 +70,8 @@ COLLECTION_CATEGORY = {
     "exports": "USER_EXPORT",
     "support_records": "SUPPORT_MESSAGE",
     "tickets": "SUPPORT_MESSAGE",
+    "support_conversations": "SUPPORT_MESSAGE",
+    "ticket_attachments": "SUPPORT_ATTACHMENT",
     "retained_order_records": "LEGAL_HOLD_RECORD",
     "marketing_profiles": "MARKETING_PROFILE",
     "email_delivery_logs": "EMAIL_DELIVERY_LOG",
@@ -123,6 +125,8 @@ EVENT_CATEGORY = (
     ("attachment_", "SUPPORT_ATTACHMENT"),
     ("restore_policy", "BACKUP_ARCHIVE"),
     ("restore_candidate", "BACKUP_ARCHIVE"),
+    ("restore_authorization", "BACKUP_ARCHIVE"),
+    ("export_", "USER_EXPORT"),
     ("contact_query", "SUPPORT_ATTACHMENT"),
     ("deletion_marker", "SUPPORT_ATTACHMENT"),
 )
@@ -204,8 +208,53 @@ def build_index(dataset: Path, extractor=None) -> tuple[list[Observation], list[
             observations.extend(_from_pdf(row, path, extractor))
         elif suffix in {".png", ".jpg", ".jpeg"} and extractor is not None:
             observations.extend(extractor.extract_image(row, path))
+    observations.extend(_activity_observations(dataset, {item.resource_id for item in observations}))
     _mark_encoding(observations)
     return observations, _activity_links(dataset)
+
+
+def _activity_observations(dataset: Path, already: set[str]) -> list[Observation]:
+    """Use an identity-bearing activity row only when no file names that resource."""
+    system_category = {
+        "export_service": "USER_EXPORT",
+        "object_storage": "SUPPORT_ATTACHMENT",
+        "account_service": "USER_PROFILE",
+        "search_service": "SEARCH_INDEX_ENTRY",
+        "analytics_platform": "ANALYTICS_PROFILE",
+        "support_platform": "SUPPORT_MESSAGE",
+        "backup_service": "BACKUP_ARCHIVE",
+        "integration_service": "DATA_FLOW",
+        "identity_service": "ACCOUNT_TOMBSTONE",
+    }
+    found: list[Observation] = []
+    with (dataset / "system_activity.csv").open(encoding="utf-8", newline="") as handle:
+        for row in csv.DictReader(handle):
+            if row["event_type"] != "LINK_RESOURCE_IDENTITY" or row["resource_id"] in already:
+                continue
+            if not (EMAIL_RE.search(row["details"]) or USER_RE.search(row["details"]) or HASH_RE.search(row["details"])):
+                continue
+            category = system_category.get(row["target_system"])
+            if category is None:
+                continue
+            tokens = _tokens(row["details"])
+            found.append(
+                Observation(
+                    file_id=row["activity_id"],
+                    captured_at=row["event_time"],
+                    copy_key="activity",
+                    system_id=row["target_system"],
+                    resource_id=row["resource_id"],
+                    category=category,
+                    presence="present",
+                    exposed=bool(EMAIL_RE.search(row["details"]) or PHONE_RE.search(row["details"]) or HASH_RE.search(row["details"])),
+                    flow="active" if category == "DATA_FLOW" else None,
+                    restore="open" if category == "BACKUP_ARCHIVE" else None,
+                    retention_until=None,
+                    hold_active=True if category == "LEGAL_HOLD_RECORD" else None,
+                    tokens=tokens,
+                )
+            )
+    return found
 
 
 def _activity_links(dataset: Path) -> list[ActivityLink]:
@@ -392,13 +441,20 @@ def _from_log_group(row: dict[str, str], copy_key: str, group: list[tuple[int, d
     if _log_presence(fields, events) is None and "enabled" not in fields and "restore_allowed" not in fields:
         return []
     system = _normalize_system(fields.get("service", "")) or system_for(resource_id)
-    category = _event_category(" ".join(events)) or _printed_category_text(text)
+    category = _event_category(" ".join(events)) or _event_category(text) or _printed_category_text(text) or _category_from_text(text)
     record = dict(fields)
     record["resource_id"] = resource_id
     observation = _from_record(row, copy_key, record, system, category, extra_text=text)
     if observation is None:
         return []
     observation.presence = _log_presence(fields, events) or observation.presence
+    lowered = text.lower().replace("\\", "")
+    if observation.presence in {None, "unknown"} and ("result=hit" in lowered or 'result="hit"' in lowered or "available=true" in lowered or 'available="true"' in lowered or "decision=deny" in lowered):
+        observation.presence = "present"
+    if observation.restore is None and ("decision=deny" in lowered or 'decision="deny"' in lowered):
+        observation.restore = "blocked"
+        if observation.presence in {None, "unknown"}:
+            observation.presence = "present"
     observation.exposed = False if observation.presence == "absent" else _exposed_fields(fields)
     if observation.presence == "present" and observation.exposed is None:
         observation.exposed = bool(_direct_identifiers(text) - _query_tokens(fields))
@@ -444,6 +500,8 @@ def _from_record(
     hold = record.get("hold_active")
     if hold is None and category == "LEGAL_HOLD_RECORD":
         hold = record.get("active")
+        if hold is None and str(record.get("result") or "").upper() == "FOUND":
+            hold = True
     return Observation(
         file_id=row["file_id"],
         captured_at=row["captured_at"],
@@ -482,10 +540,10 @@ def _flatten(record: dict) -> dict:
 
 def _state_from_record(record: dict, text: str) -> tuple[str, bool | None, str | None, str | None]:
     status = record.get("status_code", record.get("http_status"))
-    state = str(record.get("state") or record.get("account_status") or "").upper()
-    if str(status) == "404" or state in {"NOT_FOUND", "ABSENT"} or "ROWS=0" in text.upper() or "HTTP_STATUS=404" in text.upper():
+    state = str(record.get("state") or record.get("result") or record.get("account_status") or "").upper()
+    if str(status) == "404" or state in {"NOT_FOUND", "ABSENT"} or "ROWS=0" in text.upper() or 'ROWS="0"' in text.upper() or "HTTP_STATUS=404" in text.upper():
         presence = "absent"
-    elif str(status) == "200" or state in {"FOUND", "PRESENT", "IDENTIFIABLE", "ANONYMIZED", "REDACTED", "ACTIVE", "DELETION_PENDING"}:
+    elif str(status) == "200" or state in {"FOUND", "PRESENT", "IDENTIFIABLE", "ANONYMIZED", "REDACTED", "ACTIVE", "HIT", "DELETION_PENDING"} or str(record.get("available")).lower() == "true":
         presence = "present"
     elif record.get("profile") is None and "profile" in record and str(status) == "404":
         presence = "absent"
@@ -571,7 +629,9 @@ def _log_presence(fields: dict[str, str], events: list[str]) -> str | None:
         return None
     if fields.get("rows") == "0" or fields.get("http_status") == "404" or fields.get("status_code") == "404":
         return "absent"
-    if fields.get("result") == "hit" or (fields.get("rows") not in {None, ""} and fields.get("rows") != "0"):
+    if fields.get("result") in {"hit", "ACTIVE", "IDENTIFIABLE", "FOUND"} or "result=\\\"hit\\\"" in " ".join(events).lower() or (fields.get("rows") not in {None, ""} and fields.get("rows") != "0"):
+        return "present"
+    if str(fields.get("available")).lower() == "true":
         return "present"
     if fields.get("http_status") == "200" or fields.get("status_code") == "200":
         return "present"

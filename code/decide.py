@@ -75,6 +75,8 @@ def decide_case(
 
     if not violations:
         steps = _steps("VERIFICATION", verifications, cite=True)
+        for number, step in enumerate(steps, start=1):
+            step["step_no"] = number
         return CaseResult("COMPLETE", steps, [])
     steps = []
     steps.extend(_steps("FINDING", violations, cite=True))
@@ -238,8 +240,12 @@ def _classify(view: ResourceView, audit_at: str) -> tuple[str | None, str] | Non
             return None, "VERIFY_RECORD_ANONYMIZED"
         return None
     if view.category in RETAIN_CATEGORIES:
-        if view.category == "LEGAL_HOLD_RECORD" and view.hold_active is None:
-            return None
+        if view.category == "LEGAL_HOLD_RECORD":
+            hold_known = any(item.hold_active is not None for item in view.items) or bool(view.retention_until)
+            if not hold_known:
+                return None
+            if view.retention_until and view.retention_until < audit_at:
+                return None
         if view.category == "SECURITY_AUDIT_LOG" and view.retention_until and view.retention_until < audit_at:
             return None
         if view.presence == "present":

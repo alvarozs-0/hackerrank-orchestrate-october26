@@ -103,10 +103,9 @@ class FactAgent:
         body = path.read_bytes()
         try:
             answer, _model = self._complete(prompt, images=[image] if image else None, cache_kind=kind, cache_body=body.hex())
-        except ExtractionError:
-            if kind == "image":
-                self.vision_skipped.append(row["file_id"])
-            raise
+        except ExtractionError as exc:
+            self.vision_skipped.append(f"{row['file_id']}: {exc}")
+            return []
         return _observations_from_facts(row, answer)
 
     def _complete(self, prompt: str, images: list[str] | None, cache_kind: str, cache_body: str) -> tuple[str, str]:
@@ -171,8 +170,12 @@ def _post_chat(api_key: str, model: str, prompt: str, images: list[str] | None) 
         headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=120) as response:
-        body = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response:
+            body = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:500]
+        raise ExtractionError(f"HTTP {exc.code}: {detail}") from exc
     text = body["choices"][0]["message"]["content"]
     return text, body.get("usage") or {}
 

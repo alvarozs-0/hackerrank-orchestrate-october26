@@ -167,6 +167,12 @@ python -m pip install -r requirements.txt
 python code/main.py --samples
 ```
 
-`--samples` writes `build/sample_predictions.csv` and prints the score against `dataset/sample_output.csv`. It exits non-zero when any public row disagrees. The full run writes root `output.csv` only when every case decides without a guess.
+`--samples` writes `build/sample_predictions.csv` and prints the score against `dataset/sample_output.csv`. It exits non-zero when any public row disagrees.
 
-Set `XAI_API_KEY` when a screenshot, a textless PDF page, or unmatched request wording must be read. `DELETION_AUDIT_MODEL` must start with `grok-4` and defaults to `grok-4.7`. `DELETION_AUDIT_FALLBACK_MODELS` is an optional comma-separated list used only after the primary call fails. Prompts live in `code/prompts/`. Extracted facts are cached in `build/extraction_cache.sqlite`. The sample gate does not require a model call.
+The full run writes root `output.csv` with one row for every case in `dataset/deletion_requests.csv`:
+
+```bash
+python code/main.py
+```
+
+Set `XAI_API_KEY` when a screenshot, a textless PDF page, or unmatched request wording must be read. `DELETION_AUDIT_MODEL` must start with `grok-4` and defaults to `grok-4.7`. `DELETION_AUDIT_FALLBACK_MODELS` is an optional comma-separated list used only after the primary call fails. Prompts live in `code/prompts/`. Extracted facts are cached in `build/extraction_cache.sqlite`. If vision is unavailable, the run continues on text evidence and still writes `output.csv`. The sample gate does not require a model call.

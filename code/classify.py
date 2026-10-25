@@ -11,7 +11,7 @@ import re
 _DELETION = re.compile(
     r"("
     r"\bdelet(?:e|ed|ion|ing)\b|"
-    r"\beras(?:e|ure|ing)\b|"
+    r"\beras(?:e|ed|ure|ing)\b|"
     r"\bclos(?:e|ed|ing)\b.{0,40}\baccount\b|"
     r"\baccount\b.{0,40}\bclos(?:e|ed|ing)\b|"
     r"\bremove\b.{0,50}\b(?:profile|account|personal|details|data|records|result|search)\b|"
@@ -47,7 +47,9 @@ _NON_DELETION = re.compile(
     r"\binvoices\b|"
     r"\bchange\b.{0,30}\bemail\b|"
     r"\bdo not delete\b|\bnot an erasure\b|\bnot a deletion\b|"
-    r"\bkeep the account\b|\bkeep using\b"
+    r"\bkeep the account\b|\bkeep using\b|"
+    r"\bleave the account active\b|"
+    r"\breplace\b.{0,40}\b(?:phone|number|email)\b"
     r")",
     re.IGNORECASE,
 )

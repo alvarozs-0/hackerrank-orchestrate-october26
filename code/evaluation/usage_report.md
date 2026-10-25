@@ -1,13 +1,15 @@
 # Token usage
 
-Run: sample gate
+Run: full dataset, the command that wrote root `output.csv`.
 
-The policy engine chooses `deletion_status` and `steps_json`. A model is called only to extract typed facts or to answer yes/no on unmatched request text.
+The policy engine chooses `deletion_status` and `steps_json`. A model is called only to extract typed facts or to answer yes or no on unmatched request text.
 
-Environment: `DELETION_AUDIT_MODEL` (default `grok-4.7`), `DELETION_AUDIT_FALLBACK_MODELS` (empty by default), `XAI_API_KEY`.
+| Provider | Model | Calls | Input tokens | Output tokens | Estimated USD |
+| --- | --- | --- | --- | --- | --- |
+| xai | grok-4.7 | 0 | 0 | 0 | 0.00 |
 
-No model call was made. Input tokens: 0. Output tokens: 0. Estimated cost: $0.
+Overall calls: 0. Overall input tokens: 0. Overall output tokens: 0. Average tokens per request: 0. Estimated total cost: $0. Estimated cost per request: $0.
 
-Provider: xai. Model configured: DELETION_AUDIT_MODEL, default grok-4.7. Calls: 0.
+`DELETION_AUDIT_MODEL` defaults to `grok-4.7`. `DELETION_AUDIT_FALLBACK_MODELS` was empty. No API call succeeded in this run. Eleven screenshots were not sent to vision, so those files did not contribute facts. Text, SQL, JSON, and PDF text were parsed locally.
 
-Screenshots not sent to vision: 11.
+Cost estimate, if a later run calls Grok 4.7, is $2.00 per million input tokens and $6.00 per million output tokens. This run did not incur that cost.
